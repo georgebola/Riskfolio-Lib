@@ -54,6 +54,8 @@ def _fetch_yfinance(tickers: List[str], start: str, end: str) -> pd.DataFrame:
     missing = [t for t in tickers if t not in prices.columns]
     if missing:
         raise RuntimeError(f"yfinance returned no data for: {missing}")
+    if len(prices) == 0:
+        raise RuntimeError("yfinance returned 0 rows for all tickers")
     return prices[tickers]
 
 

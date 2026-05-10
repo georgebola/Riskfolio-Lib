@@ -25,7 +25,7 @@ def build_constraints(
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Tuple[float, float]]:
     """Return (A, B, (lb, ub)).
 
-    - A, B encode group constraints in the form A @ w >= B (Riskfolio convention).
+    - A, B encode group constraints in the form A @ w <= B (Riskfolio convention).
     - (lb, ub) are scalar lower/upper bounds applied to every asset.
     """
     rows_A: List[np.ndarray] = []
@@ -35,17 +35,18 @@ def build_constraints(
         indicator = _theme_indicator(theme, tickers)
         if indicator.sum() == 0:
             continue
-        # lower bound: indicator @ w >= lo
-        rows_A.append(indicator)
-        rows_B.append(lo)
-        # upper bound: -indicator @ w >= -hi
+        # lower bound: indicator @ w >= lo  =>  -indicator @ w <= -lo
         rows_A.append(-indicator)
-        rows_B.append(-hi)
+        rows_B.append(-lo)
+        # upper bound: indicator @ w <= hi
+        rows_A.append(indicator)
+        rows_B.append(hi)
 
     for lhs, rhs, slack in cfg.group_relative:
-        diff = _theme_indicator(lhs, tickers) - _theme_indicator(rhs, tickers)
+        # lhs - rhs >= slack  =>  rhs - lhs <= -slack
+        diff = _theme_indicator(rhs, tickers) - _theme_indicator(lhs, tickers)
         rows_A.append(diff)
-        rows_B.append(slack)
+        rows_B.append(-slack)
 
     A = pd.DataFrame(np.vstack(rows_A) if rows_A else np.empty((0, len(tickers))),
                      columns=tickers)

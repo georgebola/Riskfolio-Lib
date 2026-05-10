@@ -83,7 +83,7 @@ class Constraints:
     """Hard constraints applied to every optimization run."""
 
     long_only: bool = True
-    weight_min: float = 0.01
+    weight_min: float = 0.0
     weight_max: float = 0.22  # BOTZ cap
 
     # Group-level bounds: each entry is (theme_name, lower, upper).

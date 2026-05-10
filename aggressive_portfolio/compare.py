@@ -81,7 +81,7 @@ def plot_efficient_frontier(
     import riskfolio as rp
 
     port = rp.Portfolio(returns=returns)
-    port.assets_stats(method_mu="hist", method_cov="ledoit", d=0.94)
+    port.assets_stats(method_mu="hist", method_cov="ledoit")
     port.sht = False
     frontier = port.efficient_frontier(model="Classic", rm="MV", points=30, rf=rf, hist=True)
 
