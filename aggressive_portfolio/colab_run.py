@@ -113,6 +113,8 @@ try:
     WEIGHT_MAX     = float(_cfg.get("weight_max",    0.22))
     GROUP_BOUNDS   = _cfg.get("group_bounds",   [])
     GROUP_RELATIVE = _cfg.get("group_relative", [])
+    EXTRA_PORTFOLIOS = _cfg.get("portfolios", {})   # {"Name": {ticker: weight, ...}}
+
     OUTPUT_FILE    = _cfg.get("output_file",    "portfolio_analysis.xlsx")
 
     total = sum(BASELINE.values())
@@ -197,7 +199,8 @@ except NameError:
     raw_rg = input("  Relative: ").strip()
     GROUP_RELATIVE = _parse_relative(raw_rg) if raw_rg else []
 
-    OUTPUT_FILE = _ask("\nOutput filename", "portfolio_analysis.xlsx")
+    OUTPUT_FILE      = _ask("\nOutput filename", "portfolio_analysis.xlsx")
+    EXTRA_PORTFOLIOS = {}
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 print()
@@ -538,7 +541,15 @@ except Exception as e:
 print(f"  Done — {len(ppo_results)} methods\n")
 
 # ── 7. Combine results ────────────────────────────────────────────────────────
-all_weights = {"Baseline": pd.Series(BASELINE), **rf_results, **ppo_results}
+def _normalise(w):
+    s = pd.Series(w)
+    total = s.sum()
+    if total > 1.5: s /= 100; total /= 100
+    if abs(total - 1.0) > 0.005: s /= total
+    return s.reindex(TICKERS).fillna(0)
+
+normed_extras = {name: _normalise(w) for name, w in EXTRA_PORTFOLIOS.items()}
+all_weights   = {"Baseline": pd.Series(BASELINE), **normed_extras, **rf_results, **ppo_results}
 weights_df  = pd.DataFrame(all_weights).reindex(TICKERS).fillna(0).round(4)
 stats_df    = pd.DataFrame({col: port_stats(weights_df[col]) for col in weights_df}).T
 dollar_df   = (weights_df * CAPITAL).round(0)
