@@ -1,15 +1,49 @@
 """
-Portfolio Analysis — Interactive Runner
-=======================================
-Run this and answer the prompts. No file editing needed.
+Portfolio Analysis Runner — two ways to use
+============================================
 
-HOW TO RUN
-  Colab (one-liner):
+── V1  Pass everything upfront (no prompts) ──────────────────────────────────
+Define a CONFIG dict in the same cell before the exec() call:
+
+    import urllib.request
+
+    CONFIG = {
+        "capital"        : 7500,
+        "rf"             : 0.04,
+        "lookback"       : 3,
+        "baseline"       : {"BOTZ": 0.176, "GRID": 0.157, "CIBR": 0.127,
+                            "RKLB": 0.118, "SGOV": 0.098, "XAR":  0.088,
+                            "URA":  0.078, "SHLD": 0.078, "QTUM": 0.039,
+                            "XBI":  0.039},
+        "themes"         : {"Robotics": ["BOTZ"], "Grid": ["GRID"],
+                            "Cybersecurity": ["CIBR"], "Aerospace": ["XAR","RKLB"],
+                            "Nuclear": ["URA"], "Defense": ["SHLD"],
+                            "Quantum": ["QTUM"], "Biotech": ["XBI"],
+                            "FixedIncome": ["SGOV"]},
+        "bl_views"       : {"BOTZ":0.16,"URA":0.15,"CIBR":0.12,"SHLD":0.14,
+                            "XAR":0.13,"RKLB":0.20,"GRID":0.13,"QTUM":0.08,"XBI":0.12},
+        "bl_relative"    : [(["XAR","RKLB"], ["SHLD"], 0.03)],
+        "bl_confidence"  : 0.85,
+        "weight_min"     : 0.00,
+        "weight_max"     : 0.22,
+        "group_bounds"   : [(["BOTZ"],0.15,0.22),(["CIBR"],0.10,0.22),
+                            (["SGOV"],0.08,0.20),(["QTUM"],0.00,0.05),
+                            (["XBI"],0.03,0.08),(["SHLD"],0.03,0.10)],
+        "group_relative" : [(["XAR","RKLB"], ["SHLD"], 0.03)],
+        "output_file"    : "portfolio_analysis.xlsx",
+    }
+
+    url = "https://raw.githubusercontent.com/georgebola/Riskfolio-Lib/claude/portfolio-strategy-Wc7Cj/aggressive_portfolio/colab_run.py"
+    exec(urllib.request.urlopen(url).read())
+
+── V2  Interactive prompts (answer questions as it runs) ─────────────────────
+Just run the exec() without defining CONFIG first:
+
     import urllib.request
     url = "https://raw.githubusercontent.com/georgebola/Riskfolio-Lib/claude/portfolio-strategy-Wc7Cj/aggressive_portfolio/colab_run.py"
     exec(urllib.request.urlopen(url).read())
 
-  Local:
+── Local ─────────────────────────────────────────────────────────────────────
     python aggressive_portfolio/colab_run.py
 """
 
@@ -28,13 +62,13 @@ import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# ── Input helpers ─────────────────────────────────────────────────────────────
-def ask(prompt, default=None):
+# ── Input helpers (used by V2 only) ──────────────────────────────────────────
+def _ask(prompt, default=None):
     suffix = f" [Enter = {default}]" if default is not None else ""
     val = input(f"{prompt}{suffix}: ").strip()
     return val if val else str(default) if default is not None else ""
 
-def parse_pairs(s):
+def _parse_pairs(s):
     """'TICK:0.20, TICK:0.15' → {'TICK': 0.20, ...}"""
     out = {}
     for part in s.split(","):
@@ -47,128 +81,134 @@ def parse_pairs(s):
             out[k] = float(v.strip())
     return out
 
-# ── Interactive config collection ─────────────────────────────────────────────
-print()
-print("╔══════════════════════════════════════════════════════╗")
-print("║         PORTFOLIO ANALYSER — answer the prompts     ║")
-print("╚══════════════════════════════════════════════════════╝")
-
-# ── Basic settings ─────────────────────────────────────────────────────────────
-print("\n── Settings ─────────────────────────────────────────────")
-CAPITAL  = float(ask("Total capital ($)", 7500))
-RF       = float(ask("Risk-free rate (annual)", 0.04))
-LOOKBACK = int(ask("Years of price history", 3))
-
-# ── Portfolio weights ──────────────────────────────────────────────────────────
-print("\n── Portfolio weights ────────────────────────────────────")
-print("  Format : TICKER:weight, TICKER:weight  (weights can be % or decimals)")
-print("  Example: BOTZ:0.20, GRID:0.15, CIBR:0.13, RKLB:0.12, SGOV:0.10")
-while True:
-    raw = input("  Weights: ").strip()
-    BASELINE = parse_pairs(raw)
-    if BASELINE:
-        break
-    print("  ✗ Nothing parsed — try again.")
-
-total = sum(BASELINE.values())
-if total > 1.5:                              # assume percentages were entered
-    BASELINE = {k: v / 100 for k, v in BASELINE.items()}
-    total /= 100
-if abs(total - 1.0) > 0.005:
-    print(f"  Weights sum to {total:.3f} — normalising to 1.0")
-    BASELINE = {k: v / total for k, v in BASELINE.items()}
-
-TICKERS = list(BASELINE.keys())
-print(f"  ✓ {len(TICKERS)} tickers: {', '.join(TICKERS)}")
-
-# ── Weight bounds ──────────────────────────────────────────────────────────────
-print("\n── Per-asset weight bounds ──────────────────────────────")
-WEIGHT_MIN = float(ask("  Min weight per ticker", 0.00))
-WEIGHT_MAX = float(ask("  Max weight per ticker", 0.22))
-
-# ── Themes ─────────────────────────────────────────────────────────────────────
-print("\n── Themes (optional — press Enter to skip) ──────────────")
-print("  Format : ThemeName:TICK1+TICK2, ThemeName2:TICK3")
-print("  Example: Robotics:BOTZ, Aerospace:XAR+RKLB, Defense:SHLD")
-raw_themes = input("  Themes : ").strip()
-THEMES = {}
-if raw_themes:
-    for part in raw_themes.split(","):
-        part = part.strip()
-        if ":" not in part:
-            continue
-        name, tks = part.split(":", 1)
-        THEMES[name.strip()] = [t.strip().upper() for t in tks.split("+") if t.strip()]
-
-# ── Black-Litterman views ─────────────────────────────────────────────────────
-print("\n── Black-Litterman views (optional — press Enter to skip) ")
-print("  Format : TICKER:expected_annual_return")
-print("  Example: BOTZ:0.16, GRID:0.13, RKLB:0.20")
-raw_views = input("  BL views: ").strip()
-BL_VIEWS = parse_pairs(raw_views) if raw_views else {}
-
-BL_CONFIDENCE = 0.85
-BL_RELATIVE   = []
-if BL_VIEWS:
-    BL_CONFIDENCE = float(ask("  Confidence (0 = trust history, 1 = trust views)", 0.85))
-    print("  Relative views (optional — press Enter to skip)")
-    print("  Format : TICK1+TICK2>TICK3:spread  (semicolon-separated for multiple)")
-    print("  Example: XAR+RKLB>SHLD:0.03")
-    raw_rel = input("  Relative: ").strip()
-    if raw_rel:
-        for part in raw_rel.split(";"):
-            if ">" not in part or ":" not in part:
-                continue
-            lhs, rest = part.split(">", 1)
-            rhs, spread = rest.rsplit(":", 1)
-            BL_RELATIVE.append((
-                [t.strip().upper() for t in lhs.split("+") if t.strip()],
-                [t.strip().upper() for t in rhs.split("+") if t.strip()],
-                float(spread),
-            ))
-
-# ── Group weight bounds ────────────────────────────────────────────────────────
-print("\n── Group weight constraints (optional — press Enter to skip)")
-print("  Format : TICK1+TICK2:min:max  (comma-separated for multiple)")
-print("  Example: BOTZ:0.15:0.22, XAR+RKLB:0.15:0.30, SGOV:0.08:0.20")
-raw_gb = input("  Groups : ").strip()
-GROUP_BOUNDS = []
-if raw_gb:
-    for part in raw_gb.split(","):
-        pieces = [p.strip() for p in part.split(":")]
-        if len(pieces) < 3:
-            continue
-        members = [t.strip().upper() for t in pieces[0].split("+") if t.strip()]
-        GROUP_BOUNDS.append((members, float(pieces[1]), float(pieces[2])))
-
-# ── Relative group constraints ────────────────────────────────────────────────
-print("\n── Relative group constraints (optional — press Enter to skip)")
-print("  Format : TICK1+TICK2>TICK3:gap  (semicolon-separated for multiple)")
-print("  Example: XAR+RKLB>SHLD:0.03")
-raw_rg = input("  Relative: ").strip()
-GROUP_RELATIVE = []
-if raw_rg:
-    for part in raw_rg.split(";"):
+def _parse_relative(s):
+    """'TICK1+TICK2>TICK3:0.03; ...' → list of (longs, shorts, spread)"""
+    result = []
+    for part in s.split(";"):
         if ">" not in part or ":" not in part:
             continue
         lhs, rest = part.split(">", 1)
-        rhs, gap = rest.rsplit(":", 1)
-        GROUP_RELATIVE.append((
+        rhs, val  = rest.rsplit(":", 1)
+        result.append((
             [t.strip().upper() for t in lhs.split("+") if t.strip()],
             [t.strip().upper() for t in rhs.split("+") if t.strip()],
-            float(gap),
+            float(val),
         ))
+    return result
 
-# ── Output filename ────────────────────────────────────────────────────────────
-OUTPUT_FILE = ask("\nOutput filename", "portfolio_analysis.xlsx")
+# ── V1: CONFIG dict supplied → skip all prompts ───────────────────────────────
+try:
+    _cfg = CONFIG  # noqa: F821  — defined by caller before exec()
+    CAPITAL        = float(_cfg.get("capital",        7500))
+    RF             = float(_cfg.get("rf",             0.04))
+    LOOKBACK       = int(_cfg.get("lookback",         3))
+    BASELINE       = _cfg["baseline"]
+    THEMES         = _cfg.get("themes",         {})
+    BL_VIEWS       = _cfg.get("bl_views",       {})
+    BL_RELATIVE    = _cfg.get("bl_relative",    [])
+    BL_CONFIDENCE  = float(_cfg.get("bl_confidence", 0.85))
+    WEIGHT_MIN     = float(_cfg.get("weight_min",    0.00))
+    WEIGHT_MAX     = float(_cfg.get("weight_max",    0.22))
+    GROUP_BOUNDS   = _cfg.get("group_bounds",   [])
+    GROUP_RELATIVE = _cfg.get("group_relative", [])
+    OUTPUT_FILE    = _cfg.get("output_file",    "portfolio_analysis.xlsx")
 
+    # normalise weights
+    total = sum(BASELINE.values())
+    if total > 1.5:
+        BASELINE = {k: v / 100 for k, v in BASELINE.items()}; total /= 100
+    if abs(total - 1.0) > 0.005:
+        BASELINE = {k: v / total for k, v in BASELINE.items()}
+
+    TICKERS = list(BASELINE.keys())
+    print("\n[V1] CONFIG loaded — skipping prompts.")
+
+# ── V2: No CONFIG → ask prompts ───────────────────────────────────────────────
+except NameError:
+    print()
+    print("╔══════════════════════════════════════════════════════╗")
+    print("║       PORTFOLIO ANALYSER — answer the prompts       ║")
+    print("╚══════════════════════════════════════════════════════╝")
+
+    print("\n── Settings ─────────────────────────────────────────────")
+    CAPITAL  = float(_ask("Total capital ($)", 7500))
+    RF       = float(_ask("Risk-free rate (annual)", 0.04))
+    LOOKBACK = int(_ask("Years of price history", 3))
+
+    print("\n── Portfolio weights ────────────────────────────────────")
+    print("  Format : TICKER:weight, TICKER:weight  (decimals or %)")
+    print("  Example: BOTZ:0.20, GRID:0.15, CIBR:0.13, RKLB:0.12, SGOV:0.10")
+    while True:
+        raw = input("  Weights: ").strip()
+        BASELINE = _parse_pairs(raw)
+        if BASELINE: break
+        print("  ✗ Nothing parsed — try again.")
+    total = sum(BASELINE.values())
+    if total > 1.5:
+        BASELINE = {k: v / 100 for k, v in BASELINE.items()}; total /= 100
+    if abs(total - 1.0) > 0.005:
+        print(f"  Weights sum to {total:.3f} — normalising to 1.0")
+        BASELINE = {k: v / total for k, v in BASELINE.items()}
+    TICKERS = list(BASELINE.keys())
+    print(f"  ✓ {len(TICKERS)} tickers: {', '.join(TICKERS)}")
+
+    print("\n── Per-asset weight bounds ──────────────────────────────")
+    WEIGHT_MIN = float(_ask("  Min weight per ticker", 0.00))
+    WEIGHT_MAX = float(_ask("  Max weight per ticker", 0.22))
+
+    print("\n── Themes (optional — press Enter to skip) ──────────────")
+    print("  Format : ThemeName:TICK1+TICK2, ThemeName2:TICK3")
+    print("  Example: Robotics:BOTZ, Aerospace:XAR+RKLB, Defense:SHLD")
+    raw_themes = input("  Themes : ").strip()
+    THEMES = {}
+    if raw_themes:
+        for part in raw_themes.split(","):
+            part = part.strip()
+            if ":" not in part: continue
+            name, tks = part.split(":", 1)
+            THEMES[name.strip()] = [t.strip().upper() for t in tks.split("+") if t.strip()]
+
+    print("\n── Black-Litterman views (optional — press Enter to skip)")
+    print("  Format : TICKER:expected_annual_return")
+    print("  Example: BOTZ:0.16, GRID:0.13, RKLB:0.20")
+    raw_views = input("  BL views: ").strip()
+    BL_VIEWS      = _parse_pairs(raw_views) if raw_views else {}
+    BL_CONFIDENCE = 0.85
+    BL_RELATIVE   = []
+    if BL_VIEWS:
+        BL_CONFIDENCE = float(_ask("  Confidence (0=history, 1=views)", 0.85))
+        print("  Relative views: TICK1+TICK2>TICK3:spread  (semicolons for multiple, Enter to skip)")
+        raw_rel = input("  Relative: ").strip()
+        if raw_rel: BL_RELATIVE = _parse_relative(raw_rel)
+
+    print("\n── Group weight constraints (optional — press Enter to skip)")
+    print("  Format : TICK1+TICK2:min:max  (comma-separated)")
+    print("  Example: BOTZ:0.15:0.22, XAR+RKLB:0.15:0.30")
+    raw_gb = input("  Groups : ").strip()
+    GROUP_BOUNDS = []
+    if raw_gb:
+        for part in raw_gb.split(","):
+            pieces = [p.strip() for p in part.split(":")]
+            if len(pieces) < 3: continue
+            members = [t.strip().upper() for t in pieces[0].split("+") if t.strip()]
+            GROUP_BOUNDS.append((members, float(pieces[1]), float(pieces[2])))
+
+    print("\n── Relative group constraints (optional — press Enter to skip)")
+    print("  Format : TICK1+TICK2>TICK3:gap  (semicolons for multiple)")
+    print("  Example: XAR+RKLB>SHLD:0.03")
+    raw_rg = input("  Relative: ").strip()
+    GROUP_RELATIVE = _parse_relative(raw_rg) if raw_rg else []
+
+    OUTPUT_FILE = _ask("\nOutput filename", "portfolio_analysis.xlsx")
+
+# ── Summary ───────────────────────────────────────────────────────────────────
 print()
 print("╔══════════════════════════════════════════════════════╗")
 print("║                  Running analysis…                  ║")
 print("╚══════════════════════════════════════════════════════╝")
-print(f"  Tickers   : {', '.join(TICKERS)}")
-print(f"  BL views  : {'yes (' + str(len(BL_VIEWS)) + ' tickers)' if BL_VIEWS else 'skipped'}")
-print(f"  Themes    : {'yes (' + str(len(THEMES)) + ')' if THEMES else 'skipped'}")
+print(f"  Tickers    : {', '.join(TICKERS)}")
+print(f"  BL views   : {'yes (' + str(len(BL_VIEWS)) + ' tickers)' if BL_VIEWS else 'skipped'}")
+print(f"  Themes     : {'yes (' + str(len(THEMES)) + ')' if THEMES else 'skipped'}")
 print(f"  Constraints: {len(GROUP_BOUNDS)} group bounds, {len(GROUP_RELATIVE)} relative")
 print()
 
