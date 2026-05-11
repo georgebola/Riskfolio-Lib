@@ -1,14 +1,10 @@
 """
-Portfolio Analysis Runner
-=========================
-EDIT ONLY the "PORTFOLIO CONFIG" section.
-Everything below is generic and runs unchanged for any set of tickers.
+Portfolio Analysis — Interactive Runner
+=======================================
+Run this and answer the prompts. No file editing needed.
 
 HOW TO RUN
-  Colab (option A — paste):
-    Copy this entire file into a Colab cell and press Shift+Enter.
-
-  Colab (option B — one-liner):
+  Colab (one-liner):
     import urllib.request
     url = "https://raw.githubusercontent.com/georgebola/Riskfolio-Lib/claude/portfolio-strategy-Wc7Cj/aggressive_portfolio/colab_run.py"
     exec(urllib.request.urlopen(url).read())
@@ -17,94 +13,7 @@ HOW TO RUN
     python aggressive_portfolio/colab_run.py
 """
 
-# ════════════════════════════════════════════════════════════════════════════════
-#  PORTFOLIO CONFIG  ← only edit this section
-# ════════════════════════════════════════════════════════════════════════════════
-
-CAPITAL  = 7_500   # total dollars to invest
-RF       = 0.04    # annual risk-free rate
-LOOKBACK = 3       # years of price history to fetch
-
-# Your portfolio weights (must sum to ~1.0).
-# This is the "Baseline" column in the output — your human thesis portfolio.
-BASELINE = {
-    "BOTZ": 0.176,
-    "GRID": 0.157,
-    "CIBR": 0.127,
-    "RKLB": 0.118,
-    "SGOV": 0.098,
-    "XAR":  0.088,
-    "URA":  0.078,
-    "SHLD": 0.078,
-    "QTUM": 0.039,
-    "XBI":  0.039,
-}
-
-# Theme groupings for exposure analysis.
-# Set to {} to skip the ThemeExposure sheet.
-THEMES = {
-    "Robotics":      ["BOTZ"],
-    "Grid":          ["GRID"],
-    "Cybersecurity": ["CIBR"],
-    "Aerospace":     ["XAR", "RKLB"],
-    "Nuclear":       ["URA"],
-    "Defense":       ["SHLD"],
-    "Quantum":       ["QTUM"],
-    "Biotech":       ["XBI"],
-    "FixedIncome":   ["SGOV"],
-}
-
-# Black-Litterman absolute views: ticker -> expected annual return.
-# Set to {} to skip all BL methods.
-BL_VIEWS = {
-    "BOTZ": 0.16,
-    "URA":  0.15,
-    "CIBR": 0.12,
-    "SHLD": 0.14,
-    "XAR":  0.13,
-    "RKLB": 0.20,
-    "GRID": 0.13,
-    "QTUM": 0.08,
-    "XBI":  0.12,
-}
-
-# Black-Litterman relative views: (long_tickers, short_tickers, spread).
-# Example below: Aerospace expected to beat Defense by 3 percentage points.
-# Set to [] to skip relative views.
-BL_RELATIVE = [
-    (["XAR", "RKLB"], ["SHLD"], 0.03),
-]
-
-# 0 = trust only historical prior, 1 = trust only your views.
-BL_CONFIDENCE = 0.85
-
-# Per-asset weight bounds applied to all optimizer runs.
-WEIGHT_MIN = 0.00
-WEIGHT_MAX = 0.22
-
-# Group-level weight bounds: (tickers_in_group, min_total, max_total).
-# Set to [] to disable group constraints.
-GROUP_BOUNDS = [
-    (["BOTZ"],        0.15, 0.22),
-    (["CIBR"],        0.10, 0.22),
-    (["SGOV"],        0.08, 0.20),
-    (["QTUM"],        0.00, 0.05),
-    (["XBI"],         0.03, 0.08),
-    (["SHLD"],        0.03, 0.10),
-]
-
-# Relative group constraints: group_A total >= group_B total + gap.
-# Set to [] to disable.
-GROUP_RELATIVE = [
-    (["XAR", "RKLB"], ["SHLD"], 0.03),   # Aerospace >= Defense + 3%
-]
-
-OUTPUT_FILE = "portfolio_analysis.xlsx"
-
-# ════════════════════════════════════════════════════════════════════════════════
-#  ENGINE  ← do not edit below this line
-# ════════════════════════════════════════════════════════════════════════════════
-
+# ── Install ───────────────────────────────────────────────────────────────────
 import subprocess, sys
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
                        "riskfolio-lib", "yfinance", "openpyxl", "pyportfolioopt"])
@@ -119,12 +28,157 @@ import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# ── Input helpers ─────────────────────────────────────────────────────────────
+def ask(prompt, default=None):
+    suffix = f" [Enter = {default}]" if default is not None else ""
+    val = input(f"{prompt}{suffix}: ").strip()
+    return val if val else str(default) if default is not None else ""
+
+def parse_pairs(s):
+    """'TICK:0.20, TICK:0.15' → {'TICK': 0.20, ...}"""
+    out = {}
+    for part in s.split(","):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        k, v = part.split(":", 1)
+        k = k.strip().upper()
+        if k:
+            out[k] = float(v.strip())
+    return out
+
+# ── Interactive config collection ─────────────────────────────────────────────
+print()
+print("╔══════════════════════════════════════════════════════╗")
+print("║         PORTFOLIO ANALYSER — answer the prompts     ║")
+print("╚══════════════════════════════════════════════════════╝")
+
+# ── Basic settings ─────────────────────────────────────────────────────────────
+print("\n── Settings ─────────────────────────────────────────────")
+CAPITAL  = float(ask("Total capital ($)", 7500))
+RF       = float(ask("Risk-free rate (annual)", 0.04))
+LOOKBACK = int(ask("Years of price history", 3))
+
+# ── Portfolio weights ──────────────────────────────────────────────────────────
+print("\n── Portfolio weights ────────────────────────────────────")
+print("  Format : TICKER:weight, TICKER:weight  (weights can be % or decimals)")
+print("  Example: BOTZ:0.20, GRID:0.15, CIBR:0.13, RKLB:0.12, SGOV:0.10")
+while True:
+    raw = input("  Weights: ").strip()
+    BASELINE = parse_pairs(raw)
+    if BASELINE:
+        break
+    print("  ✗ Nothing parsed — try again.")
+
+total = sum(BASELINE.values())
+if total > 1.5:                              # assume percentages were entered
+    BASELINE = {k: v / 100 for k, v in BASELINE.items()}
+    total /= 100
+if abs(total - 1.0) > 0.005:
+    print(f"  Weights sum to {total:.3f} — normalising to 1.0")
+    BASELINE = {k: v / total for k, v in BASELINE.items()}
+
 TICKERS = list(BASELINE.keys())
+print(f"  ✓ {len(TICKERS)} tickers: {', '.join(TICKERS)}")
+
+# ── Weight bounds ──────────────────────────────────────────────────────────────
+print("\n── Per-asset weight bounds ──────────────────────────────")
+WEIGHT_MIN = float(ask("  Min weight per ticker", 0.00))
+WEIGHT_MAX = float(ask("  Max weight per ticker", 0.22))
+
+# ── Themes ─────────────────────────────────────────────────────────────────────
+print("\n── Themes (optional — press Enter to skip) ──────────────")
+print("  Format : ThemeName:TICK1+TICK2, ThemeName2:TICK3")
+print("  Example: Robotics:BOTZ, Aerospace:XAR+RKLB, Defense:SHLD")
+raw_themes = input("  Themes : ").strip()
+THEMES = {}
+if raw_themes:
+    for part in raw_themes.split(","):
+        part = part.strip()
+        if ":" not in part:
+            continue
+        name, tks = part.split(":", 1)
+        THEMES[name.strip()] = [t.strip().upper() for t in tks.split("+") if t.strip()]
+
+# ── Black-Litterman views ─────────────────────────────────────────────────────
+print("\n── Black-Litterman views (optional — press Enter to skip) ")
+print("  Format : TICKER:expected_annual_return")
+print("  Example: BOTZ:0.16, GRID:0.13, RKLB:0.20")
+raw_views = input("  BL views: ").strip()
+BL_VIEWS = parse_pairs(raw_views) if raw_views else {}
+
+BL_CONFIDENCE = 0.85
+BL_RELATIVE   = []
+if BL_VIEWS:
+    BL_CONFIDENCE = float(ask("  Confidence (0 = trust history, 1 = trust views)", 0.85))
+    print("  Relative views (optional — press Enter to skip)")
+    print("  Format : TICK1+TICK2>TICK3:spread  (semicolon-separated for multiple)")
+    print("  Example: XAR+RKLB>SHLD:0.03")
+    raw_rel = input("  Relative: ").strip()
+    if raw_rel:
+        for part in raw_rel.split(";"):
+            if ">" not in part or ":" not in part:
+                continue
+            lhs, rest = part.split(">", 1)
+            rhs, spread = rest.rsplit(":", 1)
+            BL_RELATIVE.append((
+                [t.strip().upper() for t in lhs.split("+") if t.strip()],
+                [t.strip().upper() for t in rhs.split("+") if t.strip()],
+                float(spread),
+            ))
+
+# ── Group weight bounds ────────────────────────────────────────────────────────
+print("\n── Group weight constraints (optional — press Enter to skip)")
+print("  Format : TICK1+TICK2:min:max  (comma-separated for multiple)")
+print("  Example: BOTZ:0.15:0.22, XAR+RKLB:0.15:0.30, SGOV:0.08:0.20")
+raw_gb = input("  Groups : ").strip()
+GROUP_BOUNDS = []
+if raw_gb:
+    for part in raw_gb.split(","):
+        pieces = [p.strip() for p in part.split(":")]
+        if len(pieces) < 3:
+            continue
+        members = [t.strip().upper() for t in pieces[0].split("+") if t.strip()]
+        GROUP_BOUNDS.append((members, float(pieces[1]), float(pieces[2])))
+
+# ── Relative group constraints ────────────────────────────────────────────────
+print("\n── Relative group constraints (optional — press Enter to skip)")
+print("  Format : TICK1+TICK2>TICK3:gap  (semicolon-separated for multiple)")
+print("  Example: XAR+RKLB>SHLD:0.03")
+raw_rg = input("  Relative: ").strip()
+GROUP_RELATIVE = []
+if raw_rg:
+    for part in raw_rg.split(";"):
+        if ">" not in part or ":" not in part:
+            continue
+        lhs, rest = part.split(">", 1)
+        rhs, gap = rest.rsplit(":", 1)
+        GROUP_RELATIVE.append((
+            [t.strip().upper() for t in lhs.split("+") if t.strip()],
+            [t.strip().upper() for t in rhs.split("+") if t.strip()],
+            float(gap),
+        ))
+
+# ── Output filename ────────────────────────────────────────────────────────────
+OUTPUT_FILE = ask("\nOutput filename", "portfolio_analysis.xlsx")
+
+print()
+print("╔══════════════════════════════════════════════════════╗")
+print("║                  Running analysis…                  ║")
+print("╚══════════════════════════════════════════════════════╝")
+print(f"  Tickers   : {', '.join(TICKERS)}")
+print(f"  BL views  : {'yes (' + str(len(BL_VIEWS)) + ' tickers)' if BL_VIEWS else 'skipped'}")
+print(f"  Themes    : {'yes (' + str(len(THEMES)) + ')' if THEMES else 'skipped'}")
+print(f"  Constraints: {len(GROUP_BOUNDS)} group bounds, {len(GROUP_RELATIVE)} relative")
+print()
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  ENGINE  ← generic, never needs editing
+# ════════════════════════════════════════════════════════════════════════════════
 
 # ── 1. Fetch prices ───────────────────────────────────────────────────────────
 end   = datetime.today()
 start = end - timedelta(days=int(365.25 * LOOKBACK) + 5)
-
 print("Fetching prices from yfinance…")
 raw     = yf.download(TICKERS, start=start.strftime("%Y-%m-%d"),
                       end=end.strftime("%Y-%m-%d"), auto_adjust=True, progress=True)
@@ -134,7 +188,6 @@ print(f"  {returns.shape[0]} trading days × {returns.shape[1]} tickers\n")
 
 # ── 2. Portfolio statistics ───────────────────────────────────────────────────
 def port_stats(weights, rf=RF):
-    """Full risk metrics for a weight vector against the global returns."""
     w       = pd.Series(weights).reindex(returns.columns).fillna(0)
     r       = returns @ w
     ann_ret = (1 + r.mean()) ** 252 - 1
@@ -163,7 +216,7 @@ def port_stats(weights, rf=RF):
         "DailyCVaR95": round(cvar95,  4),
     }
 
-# ── 3. Black-Litterman posterior (numpy) ──────────────────────────────────────
+# ── 3. Black-Litterman posterior ──────────────────────────────────────────────
 def _bl_posterior(abs_views, rel_views, confidence, tau=0.05, periods=252):
     tickers = list(returns.columns)
     Sigma   = returns.cov().values * periods
@@ -197,17 +250,16 @@ def _bl_posterior(abs_views, rel_views, confidence, tau=0.05, periods=252):
 
 # ── 4. Riskfolio helpers ──────────────────────────────────────────────────────
 def _rf_constraints(tickers):
-    """Build (A, B) inequality matrix where A @ w <= B."""
     rows_A, rows_B = [], []
     for members, lo, hi in GROUP_BOUNDS:
         ind = np.array([1.0 if t in members else 0.0 for t in tickers])
         if ind.sum() == 0: continue
-        rows_A.append(-ind); rows_B.append(-lo)   # sum >= lo
-        rows_A.append( ind); rows_B.append( hi)   # sum <= hi
+        rows_A.append(-ind); rows_B.append(-lo)
+        rows_A.append( ind); rows_B.append( hi)
     for group_a, group_b, gap in GROUP_RELATIVE:
         a = np.array([1.0 if t in group_a else 0.0 for t in tickers])
         b = np.array([1.0 if t in group_b else 0.0 for t in tickers])
-        rows_A.append(b - a); rows_B.append(-gap)  # a - b >= gap
+        rows_A.append(b - a); rows_B.append(-gap)
     if not rows_A:
         return None, None
     return np.vstack(rows_A), np.array(rows_B).reshape(-1, 1)
@@ -228,7 +280,6 @@ def _make_rf_port(mu_override=None, cov_override=None):
     return port
 
 def _rf_max_sharpe(port):
-    """Utility sweep workaround for riskfolio obj='Sharpe' bug."""
     best_s, best_w = -np.inf, None
     for l in np.geomspace(0.1, 200, 30):
         w = port.optimization(model="Classic", rm="MV", obj="Utility",
@@ -239,11 +290,11 @@ def _rf_max_sharpe(port):
             best_s, best_w = s, w["weights"]
     return best_w
 
-# ── 5. Run Riskfolio optimizers ───────────────────────────────────────────────
+# ── 5. Run Riskfolio ──────────────────────────────────────────────────────────
 print("Running Riskfolio optimizers…")
 rf_results = {}
-
 base = _make_rf_port()
+
 w = _rf_max_sharpe(base)
 if w is not None: rf_results["RF_MaxSharpe"] = w
 
@@ -258,6 +309,7 @@ w = rp2.rp_optimization(model="Classic", rm="MV", rf=RF, hist=True)
 if w is not None: rf_results["RF_RiskParity"] = w["weights"]
 
 has_bl = bool(BL_VIEWS)
+mu_bl = cov_bl = None
 if has_bl:
     print("  Computing BL posterior…")
     mu_bl, cov_bl = _bl_posterior(BL_VIEWS, BL_RELATIVE, BL_CONFIDENCE)
@@ -267,14 +319,13 @@ if has_bl:
 
 print(f"  Done — {len(rf_results)} methods\n")
 
-# ── 6. Run PyPortfolioOpt optimizers ──────────────────────────────────────────
+# ── 6. Run PyPortfolioOpt ─────────────────────────────────────────────────────
 from pypfopt import EfficientFrontier, risk_models, expected_returns, BlackLittermanModel
 
 print("Running PyPortfolioOpt optimizers…")
 ppo_results = {}
 
 def _ppo_ef(mu, S):
-    """EfficientFrontier with the same group constraints."""
     ef = EfficientFrontier(mu, S, weight_bounds=(WEIGHT_MIN, WEIGHT_MAX))
     tickers = list(returns.columns)
     for members, lo, hi in GROUP_BOUNDS:
@@ -290,9 +341,9 @@ def _ppo_ef(mu, S):
     return ef
 
 def _ppo_weights(raw):
-    """Normalize cleaned weights dict → pd.Series aligned to TICKERS."""
     w = pd.Series({t: float(raw.get(t, 0.0)) for t in TICKERS})
-    return (w / w.sum()).round(4)
+    s = w.sum()
+    return (w / s).round(4) if s > 0 else w
 
 try:
     S_hist  = risk_models.CovarianceShrinkage(prices).ledoit_wolf()
@@ -314,12 +365,11 @@ try:
 
     if has_bl:
         try:
-            abs_views_u = {k: v for k, v in BL_VIEWS.items() if k in TICKERS}
-            confs       = [BL_CONFIDENCE] * len(abs_views_u)
-            bl_m        = BlackLittermanModel(S_hist, pi=mu_hist,
-                                              absolute_views=abs_views_u,
-                                              omega="idzorek",
-                                              view_confidences=confs)
+            abs_u  = {k: v for k, v in BL_VIEWS.items() if k in TICKERS}
+            bl_m   = BlackLittermanModel(S_hist, pi=mu_hist,
+                                         absolute_views=abs_u,
+                                         omega="idzorek",
+                                         view_confidences=[BL_CONFIDENCE] * len(abs_u))
             ef = _ppo_ef(bl_m.bl_returns(), bl_m.bl_cov())
             ef.max_sharpe(risk_free_rate=RF)
             ppo_results["PPO_BL_MaxSharpe"] = _ppo_weights(ef.clean_weights())
@@ -331,7 +381,7 @@ except Exception as e:
 
 print(f"  Done — {len(ppo_results)} methods\n")
 
-# ── 7. Combine and display ────────────────────────────────────────────────────
+# ── 7. Combine results ────────────────────────────────────────────────────────
 all_weights = {"Baseline": pd.Series(BASELINE), **rf_results, **ppo_results}
 weights_df  = pd.DataFrame(all_weights).reindex(TICKERS).fillna(0).round(4)
 stats_df    = pd.DataFrame({col: port_stats(weights_df[col]) for col in weights_df}).T
@@ -363,16 +413,14 @@ with pd.ExcelWriter(out, engine="openpyxl") as xw:
     stats_df.to_excel(xw,   sheet_name="Stats_Full")
     if not theme_df.empty:
         theme_df.to_excel(xw, sheet_name="ThemeExposure")
-    if has_bl:
+    if has_bl and mu_bl is not None:
         mu_bl.to_frame("mu_BL").assign(mu_hist=returns.mean() * 252).round(4).to_excel(
             xw, sheet_name="BL_Returns")
 print(f"\nExcel written → {out.resolve()}")
 
 # ── 9. Frontier plot ──────────────────────────────────────────────────────────
-COLORS = [
-    "#d62728","#1f77b4","#2ca02c","#9467bd",
-    "#ff7f0e","#17becf","#e377c2","#8c564b","#bcbd22","#7f7f7f",
-]
+COLORS = ["#d62728","#1f77b4","#2ca02c","#9467bd",
+          "#ff7f0e","#17becf","#e377c2","#8c564b","#bcbd22","#7f7f7f"]
 fig, ax = plt.subplots(figsize=(11, 7))
 try:
     fport    = _make_rf_port()
