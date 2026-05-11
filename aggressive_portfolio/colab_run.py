@@ -255,6 +255,24 @@ def port_stats(weights, rf=RF):
     var95  = np.percentile(r, 5)
     cvar95 = r[r <= var95].mean()
 
+    # Beta, Alpha, R² vs SPY
+    beta = alpha = r2 = float("nan")
+    if spy_prices is not None:
+        try:
+            spy_ret = spy_prices.pct_change().dropna()
+            aligned = r.align(spy_ret, join="inner")
+            p_r, m_r = aligned[0], aligned[1]
+            if len(p_r) > 10:
+                cov_mat  = np.cov(p_r, m_r)
+                beta     = round(float(cov_mat[0, 1] / cov_mat[1, 1]), 4)
+                mkt_ann  = (1 + m_r.mean()) ** 252 - 1
+                port_ann = (1 + p_r.mean()) ** 252 - 1
+                alpha    = round(float(port_ann - (rf + beta * (mkt_ann - rf))), 4)
+                corr     = np.corrcoef(p_r, m_r)[0, 1]
+                r2       = round(float(corr ** 2), 4)
+        except Exception:
+            pass
+
     return {
         "AnnReturn":   round(ann_ret, 4),
         "AnnVol":      round(ann_vol, 4),
@@ -264,6 +282,9 @@ def port_stats(weights, rf=RF):
         "Calmar":      round(calmar,  4),
         "DailyVaR95":  round(var95,   4),
         "DailyCVaR95": round(cvar95,  4),
+        "Beta":        beta,
+        "Alpha":       alpha,
+        "R2_vs_SPY":   r2,
     }
 
 # ── 3. Black-Litterman posterior ──────────────────────────────────────────────
@@ -546,7 +567,8 @@ if not theme_df.empty:
     print(theme_df.to_string())
 
 # ── 8. Write Excel ────────────────────────────────────────────────────────────
-RISK_COLS = ["AnnReturn","AnnVol","Sharpe","Sortino","MaxDrawdown","Calmar","DailyCVaR95"]
+RISK_COLS = ["AnnReturn","AnnVol","Sharpe","Sortino","MaxDrawdown","Calmar","DailyCVaR95",
+             "Beta","Alpha","R2_vs_SPY"]
 out = Path(OUTPUT_FILE)
 with pd.ExcelWriter(out, engine="openpyxl") as xw:
     weights_df.to_excel(xw,     sheet_name="Weights")
