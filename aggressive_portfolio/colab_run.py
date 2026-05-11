@@ -32,12 +32,28 @@ RF          = 0.04          # risk-free rate
 LOOKBACK    = 3             # years of history
 CAPITAL     = 7_500         # dollars
 
-# v12 weights — the baseline we benchmark against
+# v12 weights — the original baseline
 V12 = {
     "BOTZ": 0.20, "URA":  0.12, "CIBR": 0.15,
     "SHLD": 0.05, "XAR":  0.15, "RKLB": 0.05,
     "GRID": 0.08, "QTUM": 0.03, "XBI":  0.05,
     "SGOV": 0.12,
+}
+
+# v13 weights — optimizer-guided revision with higher GRID/RKLB
+V13 = {
+    "BOTZ": 0.18, "URA":  0.08, "CIBR": 0.13,
+    "SHLD": 0.08, "XAR":  0.09, "RKLB": 0.12,
+    "GRID": 0.16, "QTUM": 0.04, "XBI":  0.04,
+    "SGOV": 0.10,
+}
+
+# vFinal — whole-share normalized weights (your actual deployment)
+V_FINAL = {
+    "BOTZ": 0.176, "GRID": 0.157, "CIBR": 0.127,
+    "RKLB": 0.118, "SGOV": 0.098, "XAR":  0.088,
+    "URA":  0.078, "SHLD": 0.078, "QTUM": 0.039,
+    "XBI":  0.039,
 }
 
 THEMES = {
@@ -178,16 +194,38 @@ def max_sharpe_sweep(port, returns, rf=RF):
     return best_w
 
 def port_stats(weights, returns, rf=RF):
-    w        = weights.reindex(returns.columns).fillna(0)
-    r        = returns @ w
-    ann_ret  = (1 + r.mean())**252 - 1
-    ann_vol  = r.std() * np.sqrt(252)
-    sharpe   = (ann_ret - rf) / ann_vol if ann_vol > 0 else float("nan")
-    var95    = np.percentile(r, 5)
-    cvar95   = r[r <= var95].mean()
-    return {"AnnReturn": round(ann_ret,4), "AnnVol": round(ann_vol,4),
-            "Sharpe": round(sharpe,4),
-            "DailyVaR95": round(var95,4), "DailyCVaR95": round(cvar95,4)}
+    w         = weights.reindex(returns.columns).fillna(0)
+    r         = returns @ w
+    ann_ret   = (1 + r.mean())**252 - 1
+    ann_vol   = r.std() * np.sqrt(252)
+    sharpe    = (ann_ret - rf) / ann_vol if ann_vol > 0 else float("nan")
+
+    # Sortino: only penalise negative daily returns
+    downside  = r[r < 0]
+    down_vol  = downside.std() * np.sqrt(252) if len(downside) > 1 else float("nan")
+    sortino   = (ann_ret - rf) / down_vol if down_vol > 0 else float("nan")
+
+    # Max drawdown and Calmar
+    cum       = (1 + r).cumprod()
+    peak      = cum.cummax()
+    dd        = (cum - peak) / peak
+    max_dd    = float(dd.min())
+    calmar    = ann_ret / abs(max_dd) if max_dd < 0 else float("nan")
+
+    # Tail risk
+    var95     = np.percentile(r, 5)
+    cvar95    = r[r <= var95].mean()
+
+    return {
+        "AnnReturn":   round(ann_ret, 4),
+        "AnnVol":      round(ann_vol, 4),
+        "Sharpe":      round(sharpe,  4),
+        "Sortino":     round(sortino, 4),
+        "MaxDrawdown": round(max_dd,  4),
+        "Calmar":      round(calmar,  4),
+        "DailyVaR95":  round(var95,   4),
+        "DailyCVaR95": round(cvar95,  4),
+    }
 
 print("Running optimizers (this takes ~30 seconds)…")
 base = make_port(returns)
@@ -208,7 +246,9 @@ print("Done.\n")
 
 # ── 8. Build output tables ────────────────────────────────────────────────────
 weights_df = pd.DataFrame(results)
-weights_df.insert(0, "v12", pd.Series(V12))
+weights_df.insert(0, "v12",     pd.Series(V12))
+weights_df.insert(1, "v13",     pd.Series(V13))
+weights_df.insert(2, "vFinal",  pd.Series(V_FINAL))
 weights_df = weights_df.fillna(0).round(4)
 
 stats_rows = {}
@@ -234,7 +274,7 @@ print("\n=== THEME EXPOSURE ===")
 print(theme_df.to_string())
 
 # ── 9. Write Excel ────────────────────────────────────────────────────────────
-out = Path("portfolio_v12_real.xlsx")
+out = Path("portfolio_v13_real.xlsx")
 with pd.ExcelWriter(out, engine="openpyxl") as xw:
     weights_df.to_excel(xw, sheet_name="Weights")
     dollar_df.to_excel(xw,  sheet_name="Dollars ($7500)")
@@ -242,6 +282,11 @@ with pd.ExcelWriter(out, engine="openpyxl") as xw:
     theme_df.to_excel(xw,   sheet_name="ThemeExposure")
     mu_bl.to_frame("mu_BL").assign(mu_hist=returns.mean()*252).to_excel(
         xw, sheet_name="ExpectedReturns")
+
+    # Highlight: Sharpe vs Sortino side-by-side for the three human portfolios
+    compare_cols = ["v12", "v13", "vFinal"]
+    compare_metrics = ["AnnReturn","AnnVol","Sharpe","Sortino","MaxDrawdown","Calmar","DailyCVaR95"]
+    stats_df[compare_metrics].loc[compare_cols].to_excel(xw, sheet_name="Risk_Compare")
 print(f"\nExcel written → {out.resolve()}")
 
 # ── 10. Frontier plot ─────────────────────────────────────────────────────────
@@ -257,8 +302,11 @@ try:
 except Exception:
     fig, ax = plt.subplots(figsize=(9, 6))
 
-colors = {"v12":"#d62728","MaxSharpe_MV":"#1f77b4","MinVol_MV":"#2ca02c",
-          "MinCVaR":"#9467bd","RiskParity":"#ff7f0e","BL_MaxSharpe":"#17becf"}
+colors = {
+    "v12":"#d62728","v13":"#e377c2","vFinal":"#8c564b",
+    "MaxSharpe_MV":"#1f77b4","MinVol_MV":"#2ca02c",
+    "MinCVaR":"#9467bd","RiskParity":"#ff7f0e","BL_MaxSharpe":"#17becf",
+}
 for col in weights_df.columns:
     s = port_stats(weights_df[col], returns)
     ax.scatter(s["AnnVol"], s["AnnReturn"], s=120,
@@ -266,7 +314,7 @@ for col in weights_df.columns:
                zorder=5, label=col)
 
 ax.set_xlabel("Annualised volatility"); ax.set_ylabel("Annualised return")
-ax.set_title("v12 vs optimisers — real data")
+ax.set_title("v12 / v13 / vFinal vs optimisers — real data")
 ax.grid(alpha=0.3); ax.legend(fontsize=9)
 fig.tight_layout(); fig.savefig("efficient_frontier_real.png", dpi=140)
 print("Frontier plot → efficient_frontier_real.png")
@@ -274,7 +322,7 @@ print("Frontier plot → efficient_frontier_real.png")
 # ── 11. Colab download helper ─────────────────────────────────────────────────
 try:
     from google.colab import files
-    files.download("portfolio_v12_real.xlsx")
+    files.download("portfolio_v13_real.xlsx")
     files.download("efficient_frontier_real.png")
     print("Download triggered.")
 except ImportError:
