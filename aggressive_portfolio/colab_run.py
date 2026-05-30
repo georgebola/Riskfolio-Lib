@@ -48,9 +48,12 @@ Just run the exec() without defining CONFIG first:
     python aggressive_portfolio/colab_run.py
 
 ── Methods run ───────────────────────────────────────────────────────────────
-  Riskfolio-Lib  : MaxSharpe, MinVol, MinCVaR, MinCDaR, RiskParity, HRP, HERC, NCO, BL_MaxSharpe
+  Riskfolio-Lib  : MaxSharpe, MinVol, MinCVaR, MinCDaR, RiskParity, HRP, HERC, NCO,
+                   BL_MaxSharpe (or BL_c40/BL_c70/BL_c90 if bl_confidence_sweep set)
   PyPortfolioOpt : MaxSharpe, MinVol, MinCVaR, MinSemivar, HRP, CAPM_MaxSharpe, EMA_MaxSharpe,
-                   BL_MaxSharpe, TargetReturn (if target_return set)
+                   BL_MaxSharpe (or BL_c40/BL_c70/BL_c90 if bl_confidence_sweep set),
+                   TargetReturn (if target_return set)
+  BL prior       : market-cap-implied equilibrium (reverse-optimisation), NOT historical mean
 """
 
 # ── Install ───────────────────────────────────────────────────────────────────
@@ -106,9 +109,10 @@ try:
     TARGET_RETURN  = float(_cfg["target_return"]) if _cfg.get("target_return") else None
     BASELINE       = _cfg["baseline"]
     THEMES         = _cfg.get("themes",         {})
-    BL_VIEWS       = _cfg.get("bl_views",       {})
-    BL_RELATIVE    = _cfg.get("bl_relative",    [])
-    BL_CONFIDENCE  = float(_cfg.get("bl_confidence", 0.85))
+    BL_VIEWS          = _cfg.get("bl_views",          {})
+    BL_RELATIVE       = _cfg.get("bl_relative",       [])
+    BL_CONFIDENCE     = float(_cfg.get("bl_confidence", 0.85))
+    BL_CONFIDENCE_SWEEP = _cfg.get("bl_confidence_sweep", None)  # e.g. [0.4, 0.7, 0.9]
     WEIGHT_MIN     = float(_cfg.get("weight_min",    0.00))
     WEIGHT_MAX     = float(_cfg.get("weight_max",    0.22))
     GROUP_BOUNDS   = _cfg.get("group_bounds",   [])
@@ -175,8 +179,9 @@ except NameError:
     print("  Format : TICKER:expected_annual_return")
     raw_views = input("  BL views: ").strip()
     BL_VIEWS      = _parse_pairs(raw_views) if raw_views else {}
-    BL_CONFIDENCE = 0.85
-    BL_RELATIVE   = []
+    BL_CONFIDENCE       = 0.85
+    BL_RELATIVE         = []
+    BL_CONFIDENCE_SWEEP = None
     if BL_VIEWS:
         BL_CONFIDENCE = float(_ask("  Confidence (0=history, 1=views)", 0.85))
         print("  Relative views: TICK1+TICK2>TICK3:spread  (semicolons for multiple, Enter to skip)")
@@ -291,10 +296,48 @@ def port_stats(weights, rf=RF):
     }
 
 # ── 3. Black-Litterman posterior ──────────────────────────────────────────────
+def _mkt_cap_equilibrium(tickers, Sigma, delta=2.5, periods=252):
+    """Market-cap-implied equilibrium returns (proper BL prior).
+    Uses marketCap for stocks, totalAssets for ETFs. Falls back to
+    equal-weight if data is unavailable, then clips to [-80%, 300%]
+    so outliers like RKLB cannot hijack the prior.
+    """
+    mcaps = {}
+    for t in tickers:
+        try:
+            info = yf.Ticker(t).fast_info
+            mc   = getattr(info, "market_cap", None) or 0
+            if mc == 0:
+                info2 = yf.Ticker(t).info
+                mc = info2.get("marketCap") or info2.get("totalAssets") or 0
+            mcaps[t] = max(float(mc), 0)
+        except Exception:
+            mcaps[t] = 0
+    total = sum(mcaps.values())
+    if total == 0:
+        w_mkt = np.ones(len(tickers)) / len(tickers)
+    else:
+        w_mkt = np.array([mcaps[t] / total for t in tickers])
+    # pi = delta * Sigma @ w_mkt  (reverse-optimisation equilibrium)
+    pi = delta * Sigma @ w_mkt
+    # Safety clip: never let any single prior exceed ±300% ann.
+    pi = np.clip(pi, -0.80, 3.00)
+    return pi, w_mkt
+
+# Cache market-cap prior so it's only fetched once per run
+_mkt_pi_cache = {}
+
+def _get_mkt_pi(tickers, Sigma, periods=252):
+    key = tuple(tickers)
+    if key not in _mkt_pi_cache:
+        print("  Fetching market-cap data for BL equilibrium prior…")
+        _mkt_pi_cache[key] = _mkt_cap_equilibrium(tickers, Sigma, periods=periods)
+    return _mkt_pi_cache[key]
+
 def _bl_posterior(abs_views, rel_views, confidence, tau=0.05, periods=252):
     tickers = list(returns.columns)
     Sigma   = returns.cov().values * periods
-    pi      = returns.mean().values * periods
+    pi, _   = _get_mkt_pi(tickers, Sigma, periods)
     rows, q = [], []
     for t, v in abs_views.items():
         if t in tickers:
@@ -395,18 +438,26 @@ for label, model in [("RF_HRP","HRP"), ("RF_HERC","HERC"), ("RF_NCO","NCO")]:
     except Exception as e:
         print(f"  {label} failed: {e}")
 
-# Black-Litterman
+# Black-Litterman — runs at each confidence level in sweep (or just BL_CONFIDENCE)
 has_bl = bool(BL_VIEWS)
 mu_bl_rf = cov_bl_rf = None
 if has_bl:
-    print("  Computing BL posterior…")
-    mu_bl_rf, cov_bl_rf = _bl_posterior(BL_VIEWS, BL_RELATIVE, BL_CONFIDENCE)
-    try:
-        bl_port = _make_rf_port(mu_override=mu_bl_rf, cov_override=cov_bl_rf)
-        w = _rf_max_sharpe(bl_port)
-        if w is not None: rf_results["RF_BL_MaxSharpe"] = w
-    except Exception as e:
-        print(f"  RF_BL_MaxSharpe failed: {e}")
+    _sweep = BL_CONFIDENCE_SWEEP if BL_CONFIDENCE_SWEEP else [BL_CONFIDENCE]
+    for _c in _sweep:
+        _label = f"RF_BL_c{int(round(_c*100)):02d}" if len(_sweep) > 1 else "RF_BL_MaxSharpe"
+        print(f"  Computing BL posterior (confidence={_c:.2f})…")
+        try:
+            _mu_bl, _cov_bl = _bl_posterior(BL_VIEWS, BL_RELATIVE, _c)
+            bl_port = _make_rf_port(mu_override=_mu_bl, cov_override=_cov_bl)
+            w = _rf_max_sharpe(bl_port)
+            if w is not None:
+                rf_results[_label] = w
+                if _c == BL_CONFIDENCE:          # keep primary for PPO side
+                    mu_bl_rf, cov_bl_rf = _mu_bl, _cov_bl
+        except Exception as e:
+            print(f"  {_label} failed: {e}")
+    if mu_bl_rf is None and _sweep:              # fallback: use last computed
+        mu_bl_rf, cov_bl_rf = _bl_posterior(BL_VIEWS, BL_RELATIVE, _sweep[-1])
 
 print(f"  Done — {len(rf_results)} methods\n")
 
@@ -514,17 +565,25 @@ try:
             ppo_results["PPO_CAPM_MaxSharpe"] = _ppo_weights(ef.clean_weights())
         except Exception as e: print(f"  PPO_CAPM_MaxSharpe failed: {e}")
 
-    # 8. BL MaxSharpe — PyPortfolioOpt BL with idzorek confidence weighting
+    # 8. BL MaxSharpe — PyPortfolioOpt BL with market-cap equilibrium prior + confidence sweep
     if has_bl:
-        try:
-            abs_u = {k: v for k, v in BL_VIEWS.items() if k in TICKERS}
-            bl_m  = BlackLittermanModel(S_hist, pi=mu_hist,
-                                        absolute_views=abs_u, omega="idzorek",
-                                        view_confidences=[BL_CONFIDENCE]*len(abs_u))
-            ef = _ppo_ef(bl_m.bl_returns(), bl_m.bl_cov())
-            ef.max_sharpe(risk_free_rate=RF)
-            ppo_results["PPO_BL_MaxSharpe"] = _ppo_weights(ef.clean_weights())
-        except Exception as e: print(f"  PPO_BL_MaxSharpe failed: {e}")
+        _ppo_sweep = BL_CONFIDENCE_SWEEP if BL_CONFIDENCE_SWEEP else [BL_CONFIDENCE]
+        # Build market-cap equilibrium pi for PPO (same fix as RF side)
+        _tickers_ppo = list(returns.columns)
+        _Sigma_ppo   = returns.cov().values * 252
+        _pi_mkt, _   = _get_mkt_pi(_tickers_ppo, _Sigma_ppo)
+        _pi_series   = pd.Series(_pi_mkt, index=_tickers_ppo)
+        for _c in _ppo_sweep:
+            _label = f"PPO_BL_c{int(round(_c*100)):02d}" if len(_ppo_sweep) > 1 else "PPO_BL_MaxSharpe"
+            try:
+                abs_u = {k: v for k, v in BL_VIEWS.items() if k in TICKERS}
+                bl_m  = BlackLittermanModel(S_hist, pi=_pi_series,
+                                            absolute_views=abs_u, omega="idzorek",
+                                            view_confidences=[_c]*len(abs_u))
+                ef = _ppo_ef(bl_m.bl_returns(), bl_m.bl_cov())
+                ef.max_sharpe(risk_free_rate=RF)
+                ppo_results[_label] = _ppo_weights(ef.clean_weights())
+            except Exception as e: print(f"  {_label} failed: {e}")
 
     # 9. TargetReturn — minimum vol portfolio hitting your target (if set)
     if TARGET_RETURN:
